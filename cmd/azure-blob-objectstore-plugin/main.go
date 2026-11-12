@@ -60,7 +60,7 @@ func main() {
 type storeFactory func(accountURL string, containers []string) (map[string]blobstore.Store, error)
 
 func newAzureStores(accountURL string, containers []string) (map[string]blobstore.Store, error) {
-	credential, err := newWorkloadIdentityCredential()
+	credential, err := newCredential()
 	if err != nil {
 		return nil, err
 	}
@@ -72,10 +72,49 @@ func newAzureStores(accountURL string, containers []string) (map[string]blobstor
 // service account token exchanged for an Entra token.
 var workloadIdentityEnv = []string{"AZURE_CLIENT_ID", "AZURE_TENANT_ID", "AZURE_FEDERATED_TOKEN_FILE"}
 
-// newWorkloadIdentityCredential returns the plugin's only credential: Microsoft
-// Entra workload identity federation from the pod's projected service account
-// token. It never falls back to another credential, so the plugin cannot
-// authenticate as the node's managed identity or with an application secret.
+// clientSecretEnv lists the variables a service principal with a client
+// secret reads: the application's client ID, its tenant, and the secret.
+var clientSecretEnv = []string{"AZURE_CLIENT_ID", "AZURE_TENANT_ID", "AZURE_CLIENT_SECRET"}
+
+// newCredential picks the plugin's credential from the environment. Exactly
+// one of AZURE_FEDERATED_TOKEN_FILE (workload identity federation) and
+// AZURE_CLIENT_SECRET (service principal with a client secret) must be set.
+// It never falls back to another credential, so the plugin cannot
+// authenticate as the node's managed identity.
+func newCredential() (azcore.TokenCredential, error) {
+	hasToken := os.Getenv("AZURE_FEDERATED_TOKEN_FILE") != ""
+	hasSecret := os.Getenv("AZURE_CLIENT_SECRET") != ""
+	switch {
+	case hasToken && hasSecret:
+		return nil, errors.New("ambiguous Azure credential: set only one of AZURE_FEDERATED_TOKEN_FILE and AZURE_CLIENT_SECRET")
+	case hasSecret:
+		return newClientSecretCredential()
+	default:
+		return newWorkloadIdentityCredential()
+	}
+}
+
+// newClientSecretCredential authenticates as a Microsoft Entra service
+// principal with a client secret.
+func newClientSecretCredential() (azcore.TokenCredential, error) {
+	var missing []string
+	for _, name := range clientSecretEnv {
+		if os.Getenv(name) == "" {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("service principal is not configured: %s must be set", strings.Join(missing, ", "))
+	}
+	credential, err := azidentity.NewClientSecretCredential(os.Getenv("AZURE_TENANT_ID"), os.Getenv("AZURE_CLIENT_ID"), os.Getenv("AZURE_CLIENT_SECRET"), nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating Azure client secret credential: %w", err)
+	}
+	return credential, nil
+}
+
+// newWorkloadIdentityCredential returns a Microsoft Entra workload identity
+// federation credential from the pod's projected service account token.
 func newWorkloadIdentityCredential() (azcore.TokenCredential, error) {
 	var missing []string
 	for _, name := range workloadIdentityEnv {

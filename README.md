@@ -135,11 +135,39 @@ where the token goes.
 
 ## Authentication
 
-The plugin authenticates to Azure Storage only with Microsoft Entra workload
-identity federation: it exchanges the pod's projected service account token for
-an Entra token. It does not accept storage account keys, connection strings,
-SAS tokens, client secrets or certificates, and never authenticates as the
-node's managed identity. It reads the standard `azidentity` variables:
+The plugin authenticates to Azure Storage with either Microsoft Entra workload
+identity federation or a service principal with a client secret. Set exactly
+one of `AZURE_FEDERATED_TOKEN_FILE` and `AZURE_CLIENT_SECRET`; startup fails if
+both are set.
+
+For a service principal, add the `config/service-principal` component after
+`config/` and create its Secrets in `ate-system`, each with the keys
+`client-id`, `tenant-id` and `client-secret`; both may hold the same service
+principal:
+
+```
+kubectl -n ate-system create secret generic azure-blob-objectstore-control \
+  --from-literal=client-id=<app-id> --from-literal=tenant-id=<tenant-id> \
+  --from-literal=client-secret=<secret>
+kubectl -n ate-system create secret generic azure-blob-objectstore-node \
+  --from-literal=client-id=<app-id> --from-literal=tenant-id=<tenant-id> \
+  --from-literal=client-secret=<secret>
+```
+
+```
+components:
+- ../../../../objectstore-azure-blob/config
+- ../../../../objectstore-azure-blob/config/service-principal
+```
+
+The component removes the projected token and `AZURE_FEDERATED_TOKEN_FILE`,
+so the client and tenant ID placeholders in `config/` need not be replaced.
+Grant the service principal the roles below; no federated identity credential
+is needed.
+
+The plugin does not accept storage account keys, connection strings, SAS
+tokens or certificates, and never authenticates as the node's managed
+identity. For workload identity it reads the standard `azidentity` variables:
 
 | Variable | Value |
 |---|---|

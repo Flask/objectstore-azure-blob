@@ -48,6 +48,7 @@ func TestMain(m *testing.M) {
 		"AZURE_STORAGE_CONTAINERS",
 		"AZURE_STORAGE_PREFIX",
 		"AZURE_STORAGE_ASSET_CONTAINERS",
+		"AZURE_CLIENT_SECRET",
 	}, workloadIdentityEnv...) {
 		if err := os.Unsetenv(name); err != nil {
 			panic(err)
@@ -360,12 +361,6 @@ func TestNewWorkloadIdentityCredential(t *testing.T) {
 			wantErr: []string{"token file"},
 		},
 		{
-			// A client secret does not stand in for workload identity.
-			name:    "client secret",
-			env:     map[string]string{"AZURE_CLIENT_ID": "client-id", "AZURE_TENANT_ID": "tenant-id", "AZURE_CLIENT_SECRET": "secret"},
-			wantErr: []string{"AZURE_FEDERATED_TOKEN_FILE must be set"},
-		},
-		{
 			// Neither does the host's managed identity endpoint.
 			name:    "managed identity endpoint",
 			env:     map[string]string{"AZURE_CLIENT_ID": "client-id", "IDENTITY_ENDPOINT": "http://169.254.169.254", "IDENTITY_HEADER": "header", "MSI_ENDPOINT": "http://169.254.169.254"},
@@ -388,6 +383,39 @@ func TestNewWorkloadIdentityCredential(t *testing.T) {
 				if !strings.Contains(err.Error(), want) {
 					t.Fatalf("newWorkloadIdentityCredential() = %v, want error containing %q", err, want)
 				}
+			}
+		})
+	}
+}
+
+func TestNewCredential(t *testing.T) {
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenFile, []byte("token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name    string
+		env     map[string]string
+		wantErr string
+	}{
+		{name: "client secret", env: map[string]string{"AZURE_CLIENT_ID": "client-id", "AZURE_TENANT_ID": "tenant-id", "AZURE_CLIENT_SECRET": "secret"}},
+		{name: "workload identity", env: map[string]string{"AZURE_CLIENT_ID": "client-id", "AZURE_TENANT_ID": "tenant-id", "AZURE_FEDERATED_TOKEN_FILE": tokenFile}},
+		{name: "client secret without tenant", env: map[string]string{"AZURE_CLIENT_ID": "client-id", "AZURE_CLIENT_SECRET": "secret"}, wantErr: "service principal is not configured: AZURE_TENANT_ID must be set"},
+		{name: "client secret without client ID", env: map[string]string{"AZURE_TENANT_ID": "tenant-id", "AZURE_CLIENT_SECRET": "secret"}, wantErr: "service principal is not configured: AZURE_CLIENT_ID must be set"},
+		{name: "both", env: map[string]string{"AZURE_CLIENT_ID": "client-id", "AZURE_TENANT_ID": "tenant-id", "AZURE_CLIENT_SECRET": "secret", "AZURE_FEDERATED_TOKEN_FILE": tokenFile}, wantErr: "ambiguous Azure credential"},
+		{name: "managed identity endpoint only", env: map[string]string{"AZURE_CLIENT_ID": "client-id", "IDENTITY_ENDPOINT": "http://169.254.169.254", "IDENTITY_HEADER": "header"}, wantErr: "workload identity is not configured"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setCredentialEnv(t, tc.env)
+			credential, err := newCredential()
+			if tc.wantErr == "" {
+				if err != nil || credential == nil {
+					t.Fatalf("newCredential() = %v, %v", credential, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("newCredential() = %v, want error containing %q", err, tc.wantErr)
 			}
 		})
 	}
@@ -425,7 +453,7 @@ func TestRunDoesNotReportAccountURLCredentials(t *testing.T) {
 // TestRunFailsClosedWithoutWorkloadIdentity runs the production store factory:
 // startup must stop before serving when workload identity is not configured.
 func TestRunFailsClosedWithoutWorkloadIdentity(t *testing.T) {
-	setCredentialEnv(t, map[string]string{"AZURE_CLIENT_ID": "client-id", "AZURE_CLIENT_SECRET": "secret", "IDENTITY_ENDPOINT": "http://169.254.169.254"})
+	setCredentialEnv(t, map[string]string{"AZURE_CLIENT_ID": "client-id", "IDENTITY_ENDPOINT": "http://169.254.169.254"})
 	socket := testSocket(t, "plugin.sock")
 	for _, mode := range []string{"node", "control"} {
 		err := run(t.Context(), []string{
