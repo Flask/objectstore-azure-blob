@@ -1,0 +1,111 @@
+# Copyright 2026 The Agent Substrate Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Add this component after ../ (the main component) to authenticate with a
+# Microsoft Entra service principal and client secret instead of workload
+# identity federation. It removes the projected service account token and
+# AZURE_FEDERATED_TOKEN_FILE, and reads AZURE_CLIENT_ID, AZURE_TENANT_ID and
+# AZURE_CLIENT_SECRET from these Secrets in ate-system, which you create:
+#
+#   azure-blob-objectstore-control  (ate-api-server's plugin, control mode)
+#   azure-blob-objectstore-node     (atelet's plugin, node mode)
+#
+# each with the keys client-id, tenant-id and client-secret. Both may hold the
+# same service principal. The main component's client and tenant ID
+# placeholders are overridden and need not be replaced.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+- target:
+    kind: Deployment
+    name: ate-api-server
+    namespace: ate-system
+  patch: |-
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: ate-api-server
+      namespace: ate-system
+    spec:
+      template:
+        spec:
+          initContainers:
+          - name: objectstore-plugin
+            env:
+            - name: AZURE_FEDERATED_TOKEN_FILE
+              $patch: delete
+            - name: AZURE_CLIENT_ID
+              value: null
+              valueFrom:
+                secretKeyRef:
+                  name: azure-blob-objectstore-control
+                  key: client-id
+            - name: AZURE_TENANT_ID
+              value: null
+              valueFrom:
+                secretKeyRef:
+                  name: azure-blob-objectstore-control
+                  key: tenant-id
+            - name: AZURE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: azure-blob-objectstore-control
+                  key: client-secret
+            volumeMounts:
+            - mountPath: /var/run/secrets/azure/tokens
+              $patch: delete
+          volumes:
+          - name: azure-identity-token
+            $patch: delete
+- target:
+    kind: DaemonSet
+    labelSelector: app=atelet
+    namespace: ate-system
+  patch: |-
+    apiVersion: apps/v1
+    kind: DaemonSet
+    metadata:
+      name: ignored
+      namespace: ate-system
+    spec:
+      template:
+        spec:
+          initContainers:
+          - name: objectstore-plugin
+            env:
+            - name: AZURE_FEDERATED_TOKEN_FILE
+              $patch: delete
+            - name: AZURE_CLIENT_ID
+              value: null
+              valueFrom:
+                secretKeyRef:
+                  name: azure-blob-objectstore-node
+                  key: client-id
+            - name: AZURE_TENANT_ID
+              value: null
+              valueFrom:
+                secretKeyRef:
+                  name: azure-blob-objectstore-node
+                  key: tenant-id
+            - name: AZURE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: azure-blob-objectstore-node
+                  key: client-secret
+            volumeMounts:
+            - mountPath: /var/run/secrets/azure/tokens
+              $patch: delete
+          volumes:
+          - name: azure-identity-token
+            $patch: delete

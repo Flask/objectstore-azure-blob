@@ -16,6 +16,7 @@ package main
 
 import (
 	"errors"
+	"maps"
 	"os"
 	"slices"
 	"strings"
@@ -118,6 +119,97 @@ func TestDeploymentAssetsComponent(t *testing.T) {
 	})
 	if want := []string{"snapshots", "assets"}; !errors.Is(err, errStop) || !slices.Equal(got, want) {
 		t.Errorf("run() with the assets component = %v with containers %v, want the store factory reached with %v", err, got, want)
+	}
+}
+
+// TestDeploymentServicePrincipalComponent checks that the service principal
+// component swaps each sidecar's workload identity for a client secret read
+// from its own Secret, so the plugin sees exactly one credential.
+func TestDeploymentServicePrincipalComponent(t *testing.T) {
+	data, err := os.ReadFile("../../config/service-principal/kustomization.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var component struct {
+		Patches []struct {
+			Target struct {
+				Kind string `json:"kind"`
+			} `json:"target"`
+			Patch string `json:"patch"`
+		} `json:"patches"`
+	}
+	if err := yaml.Unmarshal(data, &component); err != nil {
+		t.Fatalf("parsing service principal component: %v", err)
+	}
+	wantSecrets := map[string]string{
+		"Deployment": "azure-blob-objectstore-control",
+		"DaemonSet":  "azure-blob-objectstore-node",
+	}
+	if len(component.Patches) != len(wantSecrets) {
+		t.Fatalf("component has %d patches, want %d", len(component.Patches), len(wantSecrets))
+	}
+	for _, p := range component.Patches {
+		secret, ok := wantSecrets[p.Target.Kind]
+		if !ok {
+			t.Fatalf("unexpected patch target kind %q", p.Target.Kind)
+		}
+		delete(wantSecrets, p.Target.Kind)
+		var patch struct {
+			Spec struct {
+				Template struct {
+					Spec struct {
+						Containers     []any `json:"containers"`
+						InitContainers []struct {
+							Name string `json:"name"`
+							Env  []struct {
+								Name      string `json:"name"`
+								Patch     string `json:"$patch"`
+								ValueFrom *struct {
+									SecretKeyRef struct {
+										Name string `json:"name"`
+										Key  string `json:"key"`
+									} `json:"secretKeyRef"`
+								} `json:"valueFrom"`
+							} `json:"env"`
+						} `json:"initContainers"`
+						Volumes []struct {
+							Name  string `json:"name"`
+							Patch string `json:"$patch"`
+						} `json:"volumes"`
+					} `json:"spec"`
+				} `json:"template"`
+			} `json:"spec"`
+		}
+		if err := yaml.Unmarshal([]byte(p.Patch), &patch); err != nil {
+			t.Fatalf("parsing %s patch: %v", p.Target.Kind, err)
+		}
+		spec := patch.Spec.Template.Spec
+		if len(spec.Containers) != 0 || len(spec.InitContainers) != 1 || spec.InitContainers[0].Name != "objectstore-plugin" {
+			t.Fatalf("%s patch must change only the objectstore-plugin sidecar", p.Target.Kind)
+		}
+		if len(spec.Volumes) != 1 || spec.Volumes[0].Name != "azure-identity-token" || spec.Volumes[0].Patch != "delete" {
+			t.Errorf("%s patch does not delete the azure-identity-token volume", p.Target.Kind)
+		}
+		got := map[string]string{}
+		for _, env := range spec.InitContainers[0].Env {
+			switch {
+			case env.Patch == "delete":
+				got[env.Name] = "delete"
+			case env.ValueFrom != nil && env.ValueFrom.SecretKeyRef.Name == secret:
+				got[env.Name] = env.ValueFrom.SecretKeyRef.Key
+			default:
+				t.Errorf("%s sets %s other than from Secret %s", p.Target.Kind, env.Name, secret)
+			}
+		}
+		want := map[string]string{
+			"AZURE_FEDERATED_TOKEN_FILE": "delete",
+			"AZURE_CLIENT_ID":            "client-id",
+			"AZURE_TENANT_ID":            "tenant-id",
+			"AZURE_CLIENT_SECRET":        "client-secret",
+		}
+		if !maps.Equal(got, want) {
+			t.Errorf("%s sidecar env = %v, want %v", p.Target.Kind, got, want)
+		}
 	}
 }
 
